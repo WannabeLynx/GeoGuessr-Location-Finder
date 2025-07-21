@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Rorys Geoguessr Location Finder
 // @namespace    http://tampermonkey.net/
-// @version      1.8
-// @description  Displays the exact coordinates of the current GeoGuessr location by intercepting network requests. For educational purposes only. Cheating sucks ass. So don't use it in duels.
+// @version      2.1
+// @description  Displays GeoGuessr location via keypress. Press '1' to toggle, '2' to switch views. For educational use.
 // @author       WannabeLynx
 // @match        https://www.geoguessr.com/*
 // @grant        none
@@ -12,9 +12,11 @@
 (function() {
     'use strict';
 
-    // --- SCRIPT CONFIGURATION ---
     const SHOW_ON_START = true;
     let currentCoordinates = { lat: null, lng: null };
+
+    let countryInfo = { name: null, code: null };
+    let displayMode = 'coords';
 
     const style = `
         #location-finder-container {
@@ -28,7 +30,7 @@
             z-index: 9999;
             font-family: 'Inter', sans-serif;
             font-size: 14px;
-            display: none; /* Initially hidden until data is found */
+            display: none; /* Initially hidden */
             cursor: move;
             box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
             border: 1px solid #444;
@@ -43,6 +45,12 @@
         }
         #location-finder-container p {
             margin: 8px 0;
+            min-height: 22px; /* Prevent layout shift while loading country */
+        }
+        #location-finder-container img {
+             height: 20px;
+             border: 1px solid #555;
+             border-radius: 3px;
         }
         #location-finder-container a {
             color: #4da6ff;
@@ -58,25 +66,13 @@
         #location-finder-container a:hover {
             background-color: #555;
         }
-        #toggle-button {
-            position: fixed;
-            top: 10px;
-            right: 10px;
-            z-index: 10000;
-            background-color: #1a1a1a;
-            color: white;
-            border: 1px solid #444;
-            border-radius: 5px;
-            padding: 10px 15px;
-            cursor: pointer;
-            font-family: 'Inter', sans-serif;
-        }
     `;
 
-    let infoContainer, toggleButton;
+    let infoContainer;
 
     function createUI() {
         if (document.getElementById('location-finder-container')) return;
+
         const styleSheet = document.createElement("style");
         styleSheet.innerText = style;
         document.head.appendChild(styleSheet);
@@ -86,29 +82,63 @@
         infoContainer.innerHTML = '<h3>Location Finder</h3><p>Waiting for a new round...</p>';
         document.body.appendChild(infoContainer);
 
-        toggleButton = document.createElement('button');
-        toggleButton.id = 'toggle-button';
-        toggleButton.textContent = 'Location Info';
-        document.body.appendChild(toggleButton);
-
-        toggleButton.addEventListener('click', toggleInfoBox);
         makeDraggable(infoContainer);
     }
 
-    function updateInfoBox(lat, lng) {
-        if (!infoContainer) createUI();
+    async function fetchCountryInfo(lat, lng) {
+        if (!lat || !lng) return;
+        try {
+            const response = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&accept-language=en`);
+            const data = await response.json();
+            if (data && data.address) {
+                countryInfo = {
+                    name: data.address.country,
+                    code: data.address.country_code
+                };
+                console.log('Location Finder: Found country info', countryInfo);
+                if (displayMode === 'country') {
+                    updateInfoBox();
+                }
+            } else {
+                 throw new Error("No address data in response.");
+            }
+        } catch (error) {
+            console.error('Location Finder: Error fetching country info:', error);
+            countryInfo = { name: 'Could not retrieve country', code: null };
+        }
+    }
 
-        const mapsLink = `https://maps.google.com/?q=${lat},${lng}`;
+    function updateInfoBox() {
+        if (!infoContainer || !currentCoordinates.lat) return;
+
+        const { lat, lng } = currentCoordinates;
+        const mapsLink = `https://www.google.com/maps/@${lat},${lng},4z?entry=ttu`;
+        let contentHTML = '';
+
+        if (displayMode === 'coords') {
+            contentHTML = `
+                <p><strong>Latitude:</strong> ${lat.toFixed(6)}</p>
+                <p><strong>Longitude:</strong> ${lng.toFixed(6)}</p>
+            `;
+        } else {
+            if (countryInfo.name && countryInfo.code) {
+                const flagUrl = `https://flagcdn.com/w40/${countryInfo.code}.png`;
+                contentHTML = `
+                    <p style="display: flex; align-items: center; gap: 10px;">
+                        <img src="${flagUrl}" alt="${countryInfo.name} Flag">
+                        <strong>${countryInfo.name}</strong>
+                    </p>
+                `;
+            } else {
+                contentHTML = `<p>${countryInfo.name || 'Loading country...'}</p>`;
+            }
+        }
+
         infoContainer.innerHTML = `
             <h3>Location Finder</h3>
-            <p><strong>Latitude:</strong> ${lat.toFixed(6)}</p>
-            <p><strong>Longitude:</strong> ${lng.toFixed(6)}</p>
+            ${contentHTML}
             <a href="${mapsLink}" target="_blank">Open in Google Maps</a>
         `;
-
-        if (SHOW_ON_START) {
-            infoContainer.style.display = 'block';
-        }
     }
 
     function handleCompetitiveMode() {
@@ -165,36 +195,41 @@
     function parseGameData(data) {
         if (!data) return null;
         let roundData = null;
-
-        // Classic Game Structure
         if (data.rounds && (data.round || data.roundNumber)) {
-            const roundIndex = (data.round || data.roundNumber) - 1;
-            roundData = data.rounds[roundIndex];
-        // Streak Mode Structure
+            roundData = data.rounds[(data.round || data.roundNumber) - 1];
         } else if (data.player && data.player.currentRound) {
             roundData = data.player.currentRound;
         }
-
         if (roundData) {
-            // Location in round data
-            if (roundData.lat && roundData.lng) {
-                return { lat: roundData.lat, lng: roundData.lng };
-            }
-            // if nested fallback
-            if (roundData.panorama && roundData.panorama.lat && roundData.panorama.lng) {
-                return { lat: roundData.panorama.lat, lng: roundData.panorama.lng };
-            }
+            if (roundData.lat && roundData.lng) return { lat: roundData.lat, lng: roundData.lng };
+            if (roundData.panorama?.lat && roundData.panorama?.lng) return { lat: roundData.panorama.lat, lng: roundData.panorama.lng };
         }
         return null;
     }
 
+    function setupKeyListeners() {
+        document.addEventListener('keydown', (e) => {
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+            if (e.key === '1') {
+                e.stopImmediatePropagation();
+                toggleInfoBox();
+            } else if (e.key === '2') {
+                if (currentCoordinates.lat !== null && !isCompetitiveMode()) {
+                    e.stopImmediatePropagation();
+                    displayMode = displayMode === 'coords' ? 'country' : 'coords';
+                    updateInfoBox();
+                }
+            }
+        }, true);
+    }
+
     function interceptFetch() {
         const originalFetch = window.fetch;
-
         window.fetch = function(input, init) {
             const url = typeof input === 'string' ? input : input.url;
 
-            if (typeof url === 'string' && url.includes('/api/v3/')) {
+            if (typeof url === 'string' && url.includes('/api/v3/games/')) {
                 return originalFetch.apply(this, arguments).then(response => {
                     const clonedResponse = response.clone();
                     clonedResponse.json().then(data => {
@@ -203,21 +238,25 @@
                             return;
                         }
                         const coords = parseGameData(data);
-                        if (coords) {
-                            console.log('Location Finder (fetch): Found coordinates', coords);
+                        if (coords && (coords.lat !== currentCoordinates.lat || coords.lng !== currentCoordinates.lng)) {
+                            console.log('Location Finder (fetch): Found new coordinates', coords);
                             currentCoordinates = coords;
-                            updateInfoBox(currentCoordinates.lat, currentCoordinates.lng);
+                            countryInfo = { name: null, code: null };
+                            displayMode = 'coords';
+
+                            updateInfoBox();
+                            fetchCountryInfo(coords.lat, coords.lng);
+
+                            if (SHOW_ON_START) {
+                                infoContainer.style.display = 'block';
+                            }
                         }
                     }).catch(err => {
-                        if (isCompetitiveMode()) {
-                            handleCompetitiveMode();
-                        }
+                        // ignore
                     });
-                    // return the original response to the game
                     return response;
                 });
             }
-            // for non-api calls, return the original fetch
             return originalFetch.apply(this, arguments);
         };
     }
@@ -228,5 +267,7 @@
         createUI();
     }
 
+    setupKeyListeners();
     interceptFetch();
+
 })();
